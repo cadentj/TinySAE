@@ -10,6 +10,7 @@ from transformers import PreTrainedModel
 from tqdm import tqdm
 import wandb
 
+
 @dataclass
 class SaeConfig:
     d_in: int
@@ -17,6 +18,7 @@ class SaeConfig:
     hookpoint: str
     k: int
     transcode: bool = False
+
 
 class Sae(nn.Module):
     def __init__(
@@ -29,18 +31,21 @@ class Sae(nn.Module):
 
         self.cfg = cfg
 
-        self.encoder = nn.Linear(self.cfg.d_in, self.cfg.num_latents, device=device, dtype=dtype)
+        self.encoder = nn.Linear(
+            self.cfg.d_in, self.cfg.num_latents, device=device, dtype=dtype
+        )
         self.encoder.bias.data.zero_()
-        
+
         self.W_dec = nn.Parameter(self.encoder.weight.data.clone())
         self.set_decoder_norm_to_unit_norm()
 
-        self.b_dec = nn.Parameter(torch.zeros(self.cfg.d_in, dtype=dtype, device=device))
+        self.b_dec = nn.Parameter(
+            torch.zeros(self.cfg.d_in, dtype=dtype, device=device)
+        )
 
     @staticmethod
     def load_from_disk(
-        path: Path | str,
-        device: str | torch.device | None = None
+        path: Path | str, device: str | torch.device | None = None
     ) -> "Sae":
         path = Path(path)
 
@@ -50,9 +55,7 @@ class Sae(nn.Module):
 
         sae = Sae(cfg, device=device)
         load_model(
-            model=sae,
-            filename=str(path / "sae.safetensors"),
-            device=str(device)
+            model=sae, filename=str(path / "sae.safetensors"), device=str(device)
         )
         return sae
 
@@ -71,7 +74,7 @@ class Sae(nn.Module):
     @property
     def dtype(self):
         return self.encoder.weight.dtype
-    
+
     def encode(self, x: Tensor) -> Tensor:
         forward = self.encoder(x)
         top_acts, top_indices = forward.topk(self.cfg.k, dim=-1)
@@ -88,11 +91,11 @@ class Sae(nn.Module):
     def forward(
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
     ) -> Tensor:
-            
+
         encoded = self.encode(x)
         decoded = self.decode(encoded)
         return decoded
-    
+
     @torch.no_grad()
     def set_decoder_norm_to_unit_norm(self):
         assert self.W_dec is not None, "Decoder weight was not initialized."
@@ -112,11 +115,13 @@ class TrainConfig:
     mask_first_n_tokens: int = 1
 
 
-def train_sae(sae: Sae, 
-              model: PreTrainedModel, 
-              token_iterator: Iterable[Tensor], 
-              train_cfg: TrainConfig):
-    
+def train_sae(
+    sae: Sae,
+    model: PreTrainedModel,
+    token_iterator: Iterable[Tensor],
+    train_cfg: TrainConfig,
+):
+
     wandb.init(
         name=train_cfg.wandb_name,
         project=train_cfg.wandb_project,
@@ -132,6 +137,7 @@ def train_sae(sae: Sae,
 
     global_inputs = None
     global_outputs = None
+
     def hook(module: nn.Module, inputs, outputs):
         nonlocal global_inputs, global_outputs
         if isinstance(inputs, tuple):
@@ -159,18 +165,20 @@ def train_sae(sae: Sae,
 
             with torch.no_grad():
                 model(torch.stack(batch).to(model.device))
-            
-            sae_input = global_inputs.to(sae.dtype).to(sae.device)
-            sae_output = global_outputs.to(sae.dtype).to(sae.device)
+
+            sae_input = global_inputs.to(sae.dtype).to(sae.device)[
+                :, train_cfg.mask_first_n_tokens :
+            ]
+            sae_output = global_outputs.to(sae.dtype).to(sae.device)[
+                :, train_cfg.mask_first_n_tokens :
+            ]
+
             if not sae.cfg.transcode:
                 sae_input = sae_output
 
-            sae_input = sae_input[:, train_cfg.mask_first_n_tokens:]
-            sae_output = sae_output[:, train_cfg.mask_first_n_tokens:]
-
             predicted = sae(sae_input)
             error = predicted - sae_output
-            loss = (error ** 2).sum()
+            loss = (error**2).sum()
             loss /= ((sae_output - sae_output.mean(dim=1, keepdim=True)) ** 2).sum()
 
             loss.backward()

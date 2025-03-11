@@ -19,6 +19,7 @@ dotenv.load_dotenv()
 # %%
 
 import os
+
 os.environ["OMP_NUM_THREADS"] = "16"
 os.environ["HF_HOME"] = "/workspace/.cache/huggingface"
 import torch
@@ -37,10 +38,12 @@ dataset = dataset.shuffle(seed=43)
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
 context_len = 1024
+
+
 class DatasetIterator:
     def __init__(self):
         self.length = len(dataset)
-        
+
     def __iter__(self):
         for i in range(len(dataset)):
             tokens = tokenizer(dataset[i]["text"], return_tensors="pt")["input_ids"][0]
@@ -49,12 +52,14 @@ class DatasetIterator:
             if len(tokens) < context_len:
                 continue
             yield tokens
-            
+
     def __len__(self):
         return self.length
 
+
 def dataset_iterator():
     return DatasetIterator()
+
 
 device = "cuda:0"
 gpt = AutoModelForCausalLM.from_pretrained(
