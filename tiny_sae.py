@@ -171,7 +171,7 @@ def train_sae(sae: Sae,
             predicted = sae(sae_input)
             error = predicted - sae_output
             loss = (error ** 2).sum()
-            loss /= ((sae_input - sae_input.mean(dim=1, keepdim=True)) ** 2).sum()
+            loss /= ((sae_output - sae_output.mean(dim=1, keepdim=True)) ** 2).sum()
 
             loss.backward()
             if tokens_seen_since_last_step >= train_cfg.optimize_every_n_tokens:
