@@ -76,7 +76,7 @@ class Sae(nn.Module):
         return self.encoder.weight.dtype
 
     def encode(self, x: Tensor) -> Tensor:
-        forward = self.encoder(x)
+        forward = self.encoder(x - self.b_dec)
         top_acts, top_indices = forward.topk(self.cfg.k, dim=-1)
         result = torch.zeros_like(forward)
         result.scatter_(dim=-1, index=top_indices, src=top_acts)
