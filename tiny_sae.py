@@ -45,14 +45,12 @@ class Sae(nn.Module):
         )
 
     @staticmethod
-    def load_from_disk(
-        path: Path | str, device: str | torch.device | None = None
-    ) -> "Sae":
+    def load_from_disk(path: Path | str, device: str | torch.device = "cpu") -> "Sae":
         path = Path(path)
 
         with open(path / "cfg.json", "r") as f:
             cfg_dict = json.load(f)
-            cfg = SaeConfig.from_dict(cfg_dict, drop_extra_fields=True)
+            cfg = SaeConfig(**cfg_dict)
 
         sae = Sae(cfg, device=device)
         load_model(

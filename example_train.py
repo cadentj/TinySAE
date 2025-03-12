@@ -96,3 +96,6 @@ cfg = TrainConfig(
 )
 train_sae(sae=sae, model=gpt, token_iterator=data, train_cfg=cfg, use_wandb=True)
 # %%
+
+sae = Sae.load_from_disk("sae-ckpts/test")
+# %%
