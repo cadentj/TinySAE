@@ -52,28 +52,27 @@ gpt = AutoModelForCausalLM.from_pretrained(
 
 # %%
 
+
 def _tokenize_fn(x: dict[str, list]):
     output = tokenizer(
-        x["text"], 
-        max_length=context_len,
-        return_attention_mask=False,
-        truncation=True
+        x["text"], max_length=context_len, return_attention_mask=False, truncation=True
     )
 
     return output
 
+
 data = dataset.map(
-    _tokenize_fn,
-    batched=True,
-    batch_size=32,
-    num_proc=16,
-    load_from_cache_file=True
+    _tokenize_fn, batched=True, batch_size=32, num_proc=16, load_from_cache_file=True
 )
 
 # %%
 
 # Filter out sequences shorter than context_len
-data = data.filter(lambda x: len(x["input_ids"]) == context_len, load_from_cache_file=True, batch_size=4096)
+data = data.filter(
+    lambda x: len(x["input_ids"]) == context_len,
+    load_from_cache_file=True,
+    batch_size=4096,
+)
 
 # %%
 
@@ -95,11 +94,5 @@ cfg = TrainConfig(
     model_batch_size=16,
     mask_first_n_tokens=1,
 )
-train_sae(
-    sae=sae,
-    model=gpt,
-    token_iterator=data,
-    train_cfg=cfg,
-    use_wandb=True
-)
+train_sae(sae=sae, model=gpt, token_iterator=data, train_cfg=cfg, use_wandb=True)
 # %%

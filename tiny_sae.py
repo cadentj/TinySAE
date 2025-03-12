@@ -2,7 +2,6 @@ from dataclasses import dataclass, asdict
 import json
 from pathlib import Path
 from typing import Iterable
-# from bitsandbytes.optim import Adam8bit as Adam
 from torch.optim import Adam
 import torch
 from safetensors.torch import load_model, save_model
@@ -11,6 +10,7 @@ from transformers import PreTrainedModel
 from tqdm import tqdm
 import wandb
 import einops
+
 
 @dataclass
 class SaeConfig:
@@ -91,17 +91,13 @@ class Sae(nn.Module):
         res = einops.rearrange(res, "(b n) d -> b n d", b=batch_size)
         return res + self.b_dec
 
-    def forward(
-        self, x: Tensor
-    ) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         return self.decode(*self.encode(x))
 
     @torch.no_grad()
     def set_decoder_norm_to_unit_norm(self):
-        assert self.W_dec is not None, "Decoder weight was not initialized."
-        eps = torch.finfo(self.W_dec.dtype).eps
         norm = torch.norm(self.W_dec.data, dim=1, keepdim=True)
-        self.W_dec.data /= norm + eps
+        self.W_dec.data /= norm + 1e-5
 
 
 @dataclass
@@ -119,7 +115,7 @@ def train_sae(
     model: PreTrainedModel,
     token_iterator: Iterable[Tensor],
     train_cfg: TrainConfig,
-    use_wandb: bool = True
+    use_wandb: bool = True,
 ):
 
     if use_wandb:
@@ -153,7 +149,6 @@ def train_sae(
 
     handle = hookpoint.register_forward_hook(hook)
 
-    import time
     try:
         tokens_seen_since_last_step = 0
         tokens_seen_since_last_save = 0
@@ -172,7 +167,7 @@ def train_sae(
             with torch.no_grad():
                 try:
                     model(batch)
-                except StopIteration as e:
+                except StopIteration:
                     pass
 
             sae_input = global_inputs.to(sae.dtype).to(sae.device)[
@@ -189,7 +184,6 @@ def train_sae(
             error = predicted - sae_output
             loss = (error**2).sum()
             loss /= ((sae_output - sae_output.mean(dim=1, keepdim=True)) ** 2).sum()
-
             loss.backward()
 
             if tokens_seen_since_last_step >= train_cfg.optimize_every_n_tokens:
