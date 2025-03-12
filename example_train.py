@@ -12,6 +12,7 @@ try:
 except:
     is_notebook = False
 
+import math
 import dotenv
 
 dotenv.load_dotenv()
@@ -26,47 +27,54 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tiny_sae import Sae, SaeConfig, train_sae, TrainConfig
+from tqdm import tqdm
 
+# %%
 
 MODEL = "openai-community/gpt2"
+dataset_name = "togethercomputer/RedPajama-Data-1T-Sample"
 dataset = load_dataset(
-    "togethercomputer/RedPajama-Data-1T-Sample",
+    dataset_name,
     split="train",
     trust_remote_code=True,
 )
 dataset = dataset.shuffle(seed=43)
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
+
 context_len = 1024
-
-
-class DatasetIterator:
-    def __init__(self):
-        self.length = len(dataset)
-
-    def __iter__(self):
-        for i in range(len(dataset)):
-            tokens = tokenizer(dataset[i]["text"], return_tensors="pt")["input_ids"][0]
-            if len(tokens) > context_len:
-                tokens = tokens[:context_len]
-            if len(tokens) < context_len:
-                continue
-            yield tokens
-
-    def __len__(self):
-        return self.length
-
-
-def dataset_iterator():
-    return DatasetIterator()
-
-
 device = "cuda:0"
 gpt = AutoModelForCausalLM.from_pretrained(
     MODEL,
     device_map={"": device},
     torch_dtype=torch.bfloat16,
 )
+
+# %%
+
+def _tokenize_fn(x: dict[str, list]):
+    output = tokenizer(
+        x["text"], 
+        max_length=context_len,
+        return_attention_mask=False,
+        truncation=True
+    )
+
+    return output
+
+data = dataset.map(
+    _tokenize_fn,
+    batched=True,
+    batch_size=32,
+    num_proc=16,
+    load_from_cache_file=True
+)
+
+# %%
+
+# Filter out sequences shorter than context_len
+data = data.filter(lambda x: len(x["input_ids"]) == context_len, load_from_cache_file=True, batch_size=4096)
+
 # %%
 
 sae_cfg = SaeConfig(
@@ -85,6 +93,13 @@ cfg = TrainConfig(
     save_every_n_tokens=10_000_000,
     optimize_every_n_tokens=8192,
     model_batch_size=16,
+    mask_first_n_tokens=1,
 )
-train_sae(sae, gpt, dataset_iterator(), train_cfg=cfg)
+train_sae(
+    sae=sae,
+    model=gpt,
+    token_iterator=data,
+    train_cfg=cfg,
+    use_wandb=True
+)
 # %%

@@ -2,14 +2,15 @@ from dataclasses import dataclass, asdict
 import json
 from pathlib import Path
 from typing import Iterable
-from bitsandbytes.optim import Adam8bit as Adam
+# from bitsandbytes.optim import Adam8bit as Adam
+from torch.optim import Adam
 import torch
 from safetensors.torch import load_model, save_model
 from torch import Tensor, nn
 from transformers import PreTrainedModel
 from tqdm import tqdm
 import wandb
-
+import einops
 
 @dataclass
 class SaeConfig:
@@ -78,28 +79,26 @@ class Sae(nn.Module):
     def encode(self, x: Tensor) -> Tensor:
         forward = self.encoder(x - self.b_dec)
         top_acts, top_indices = forward.topk(self.cfg.k, dim=-1)
-        result = torch.zeros_like(forward)
-        result.scatter_(dim=-1, index=top_indices, src=top_acts)
-        return result
+        return top_acts, top_indices
 
-    def decode(self, latents: Tensor) -> Tensor:
-        assert self.W_dec is not None, "Decoder weight was not initialized."
-
-        y = latents @ self.W_dec
-        return y + self.b_dec
+    def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
+        batch_size = top_indices.shape[0]
+        top_acts = top_acts.flatten(end_dim=1)
+        top_indices = top_indices.flatten(end_dim=1)
+        res = nn.functional.embedding_bag(
+            top_indices, self.W_dec, per_sample_weights=top_acts, mode="sum"
+        )
+        res = einops.rearrange(res, "(b n) d -> b n d", b=batch_size)
+        return res + self.b_dec
 
     def forward(
-        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+        self, x: Tensor
     ) -> Tensor:
-
-        encoded = self.encode(x)
-        decoded = self.decode(encoded)
-        return decoded
+        return self.decode(*self.encode(x))
 
     @torch.no_grad()
     def set_decoder_norm_to_unit_norm(self):
         assert self.W_dec is not None, "Decoder weight was not initialized."
-
         eps = torch.finfo(self.W_dec.dtype).eps
         norm = torch.norm(self.W_dec.data, dim=1, keepdim=True)
         self.W_dec.data /= norm + eps
@@ -109,10 +108,10 @@ class Sae(nn.Module):
 class TrainConfig:
     wandb_project: str
     wandb_name: str
+    mask_first_n_tokens: int
     model_batch_size: int = 8
     save_every_n_tokens: int = 10_000_000
     optimize_every_n_tokens: int = 8192
-    mask_first_n_tokens: int = 1
 
 
 def train_sae(
@@ -120,14 +119,16 @@ def train_sae(
     model: PreTrainedModel,
     token_iterator: Iterable[Tensor],
     train_cfg: TrainConfig,
+    use_wandb: bool = True
 ):
 
-    wandb.init(
-        name=train_cfg.wandb_name,
-        project=train_cfg.wandb_project,
-        config={"sae_config": asdict(sae.cfg), "train_config": asdict(train_cfg)},
-        save_code=True,
-    )
+    if use_wandb:
+        wandb.init(
+            name=train_cfg.wandb_name,
+            project=train_cfg.wandb_project,
+            config={"sae_config": asdict(sae.cfg), "train_config": asdict(train_cfg)},
+            save_code=True,
+        )
 
     hookpoint = model.get_submodule(sae.cfg.hookpoint)
 
@@ -148,23 +149,31 @@ def train_sae(
         global_inputs = inputs
         global_outputs = outputs
 
+        raise StopIteration("Stop here")
+
     handle = hookpoint.register_forward_hook(hook)
 
+    import time
     try:
         tokens_seen_since_last_step = 0
         tokens_seen_since_last_save = 0
         bar = tqdm(token_iterator)
         batch = []
         for step, tokens in enumerate(bar):
-            tokens_seen_since_last_step += tokens.numel()
-            tokens_seen_since_last_save += tokens.numel()
 
-            batch.append(tokens)
             if len(batch) < train_cfg.model_batch_size:
+                batch.append(torch.tensor(tokens["input_ids"]))
                 continue
 
+            batch = torch.stack(batch).to(model.device)
+            tokens_seen_since_last_step += batch.numel()
+            tokens_seen_since_last_save += batch.numel()
+
             with torch.no_grad():
-                model(torch.stack(batch).to(model.device))
+                try:
+                    model(batch)
+                except StopIteration as e:
+                    pass
 
             sae_input = global_inputs.to(sae.dtype).to(sae.device)[
                 :, train_cfg.mask_first_n_tokens :
@@ -182,15 +191,16 @@ def train_sae(
             loss /= ((sae_output - sae_output.mean(dim=1, keepdim=True)) ** 2).sum()
 
             loss.backward()
+
             if tokens_seen_since_last_step >= train_cfg.optimize_every_n_tokens:
                 optimizer.step()
                 optimizer.zero_grad()
                 sae.set_decoder_norm_to_unit_norm()
                 tokens_seen_since_last_step = 0
-                wandb.log({"fvu": loss.item()}, step=step)
+                if use_wandb:
+                    wandb.log({"fvu": loss.item()}, step=step)
 
             if tokens_seen_since_last_save >= train_cfg.save_every_n_tokens:
-                print("Saving checkpoint")
                 sae.save_to_disk(f"sae-ckpts/{train_cfg.wandb_name}")
                 tokens_seen_since_last_save = 0
 
@@ -198,4 +208,5 @@ def train_sae(
             batch = []
     finally:
         handle.remove()
-        wandb.finish()
+        if use_wandb:
+            wandb.finish()
