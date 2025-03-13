@@ -71,7 +71,7 @@ data = dataset.map(
 data = data.filter(
     lambda x: len(x["input_ids"]) == context_len,
     load_from_cache_file=True,
-    batch_size=4096,
+    num_proc=16,
 )
 
 # %%
