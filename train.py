@@ -10,6 +10,7 @@ def load_model_and_tokenizer(model_name, device):
         model_name,
         device_map=device,
         torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",
     )
     return model, tokenizer
 
@@ -53,13 +54,12 @@ def main():
     # Configuration
     MODEL = "google/gemma-3-4b-pt"
     DATASET_NAME = "togethercomputer/RedPajama-Data-1T-Sample"
-    CONTEXT_LEN = 1024
 
     # Load model and tokenizer
     model, tokenizer = load_model_and_tokenizer(MODEL, "auto")
     
     # Prepare dataset
-    data = prepare_dataset(DATASET_NAME, tokenizer, CONTEXT_LEN)
+    data = prepare_dataset(DATASET_NAME, tokenizer, 1024)
 
     # Configure SAE
     sae_cfg = SaeConfig(
@@ -74,9 +74,9 @@ def main():
     train_cfg = TrainConfig(
         wandb_project="tiny-sae",
         wandb_name="test",
-        save_every_n_tokens=100_000_000,
+        save_every_n_tokens=50_000_000,
         optimize_every_n_tokens=8192,
-        model_batch_size=16,
+        model_batch_size=8,
         mask_first_n_tokens=1,
     )
 

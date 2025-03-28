@@ -2,12 +2,16 @@ from dataclasses import dataclass, asdict
 import json
 from pathlib import Path
 from typing import Iterable
+
+import einops
 import torch as t
 from safetensors.torch import load_model, save_model
-from transformers import PreTrainedModel
 from tqdm import tqdm
 import wandb
-import einops
+from transformers import (
+    PreTrainedModel,
+    get_linear_schedule_with_warmup,
+)
 
 
 class EarlyExit(Exception):
@@ -138,11 +142,12 @@ def train_sae(
             save_code=True,
         )
 
-    hookpoint = model.get_submodule(sae.cfg.hookpoint)
-
     # Auto-select LR using 1 / sqrt(d) scaling law from Fig 3 of the paper
     lr = 2e-4 / (sae.cfg.num_latents / (2**14)) ** 0.5
     optimizer = t.optim.Adam(sae.parameters(), lr=lr)
+
+    num_batches = len(token_iterator) // train_cfg.model_batch_size
+    scheduler = get_linear_schedule_with_warmup(optimizer, 1000, num_batches)
 
     x = None
 
@@ -155,27 +160,28 @@ def train_sae(
 
         raise EarlyExit("Stop here")
 
+    hookpoint = model.get_submodule(sae.cfg.hookpoint)
     handle = hookpoint.register_forward_hook(hook)
 
+    global_step = 0
     num_tokens_since_fired = t.zeros(sae.cfg.num_latents, device="cuda")
 
     def _update_tokens_since_fired(top_indices: t.Tensor, num_tokens: int):
         nonlocal num_tokens_since_fired
-        top_indices = top_indices.flatten(end_dim=1)
-        did_fire = t.zeros(sae.cfg.num_latents, device="cuda").bool()
-        did_fire[top_indices] = True
-        num_tokens_since_fired[did_fire] = 0
-        num_tokens_since_fired[~did_fire] += num_tokens
+        top_indices = top_indices.flatten(end_dim=1).unique()
 
-        dead_count = (num_tokens_since_fired > 10_000_000).sum()
-        wandb.log({"dead_count": dead_count}, step=step)
+        num_tokens_since_fired.add_(num_tokens)
+        num_tokens_since_fired.index_fill_(0, top_indices, 0)
+
+        dead_count = (num_tokens_since_fired > 5_000_000).sum()
+        wandb.log({"dead_count": dead_count / sae.cfg.num_latents}, step=global_step)
 
     try:
         tokens_seen_since_last_step = 0
         tokens_seen_since_last_save = 0
-        bar = tqdm(token_iterator)
+        pbar = tqdm(token_iterator)
         batch = []
-        for step, tokens in enumerate(bar):
+        for tokens in pbar:
             if len(batch) < train_cfg.model_batch_size:
                 batch.append(t.tensor(tokens["input_ids"]))
                 continue
@@ -198,22 +204,25 @@ def train_sae(
             _update_tokens_since_fired(top_indices, n_tokens)
             error = x_hat - x
             loss = error.pow(2).sum()
-            loss = loss / (x_hat - x_hat.mean(dim=1, keepdim=True)).pow(2).sum()
+            loss = loss / (x_hat - x_hat.mean(1, keepdim=True)).pow(2).sum()
             loss.backward()
 
             if tokens_seen_since_last_step >= train_cfg.optimize_every_n_tokens:
                 optimizer.step()
                 optimizer.zero_grad()
+                if scheduler is not None:
+                    scheduler.step()
                 sae.set_decoder_norm_to_unit_norm()
                 tokens_seen_since_last_step = 0
                 if use_wandb:
-                    wandb.log({"fvu": loss.item()}, step=step)
+                    wandb.log({"fvu": loss.item()}, step=global_step)
+                global_step += 1
 
             if tokens_seen_since_last_save >= train_cfg.save_every_n_tokens:
                 sae.save_to_disk(f"sae-ckpts/{train_cfg.wandb_name}")
                 tokens_seen_since_last_save = 0
 
-            bar.set_postfix(loss=loss.item())
+            pbar.set_postfix(loss=loss.item())
             batch = []
     finally:
         handle.remove()
