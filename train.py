@@ -2,14 +2,13 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tiny_sae import Sae, SaeConfig, train_sae, TrainConfig
-from gemma_device_map import device_map
 
 def load_model_and_tokenizer(model_name, device):
     """Load the model and tokenizer"""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        device_map=device_map,
+        device_map="auto",
         torch_dtype=torch.bfloat16,
     )
     return model, tokenizer
@@ -68,7 +67,7 @@ def main():
         d_in=2560,
         num_latents=2560*8,
         k=128,
-        hookpoint="model.layers.27",
+        hookpoint="language_model.model.layers.27",
     )
     sae = Sae(sae_cfg, device=DEVICE)
 
@@ -93,12 +92,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# %%
-
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from gemma_device_map import device_map
-
-model = AutoModelForCausalLM.from_pretrained("google/gemma-3-4b-pt", device_map=device_map)
-
-# %%
