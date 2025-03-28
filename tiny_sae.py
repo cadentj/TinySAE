@@ -18,7 +18,6 @@ class SaeConfig:
     num_latents: int
     hookpoint: str
     k: int
-    transcode: bool = False
 
 
 class Sae(nn.Module):
@@ -45,7 +44,9 @@ class Sae(nn.Module):
         )
 
     @staticmethod
-    def load_from_disk(path: Path | str, device: str | torch.device = "cpu") -> "Sae":
+    def load_from_disk(
+        path: Path | str, device: str | torch.device = "cpu"
+    ) -> "Sae":
         path = Path(path)
 
         with open(path / "cfg.json", "r") as f:
@@ -54,7 +55,9 @@ class Sae(nn.Module):
 
         sae = Sae(cfg, device=device)
         load_model(
-            model=sae, filename=str(path / "sae.safetensors"), device=str(device)
+            model=sae,
+            filename=str(path / "sae.safetensors"),
+            device=str(device),
         )
         return sae
 
@@ -76,10 +79,14 @@ class Sae(nn.Module):
 
     def encode(self, x: Tensor) -> Tensor:
         forward = self.encoder(x - self.b_dec)
-        top_acts, top_indices = forward.topk(self.cfg.k, dim=-1)
+        top_acts, top_indices = forward.topk(self.cfg.k, dim=-1, sorted=False)
         return top_acts, top_indices
 
-    def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
+    def decode(
+        self,
+        top_acts: Tensor,
+        top_indices: Tensor,
+    ) -> Tensor:
         batch_size = top_indices.shape[0]
         top_acts = top_acts.flatten(end_dim=1)
         top_indices = top_indices.flatten(end_dim=1)
@@ -87,10 +94,13 @@ class Sae(nn.Module):
             top_indices, self.W_dec, per_sample_weights=top_acts, mode="sum"
         )
         res = einops.rearrange(res, "(b n) d -> b n d", b=batch_size)
-        return res + self.b_dec
+        return res + self.b_dec, top_indices
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self.decode(*self.encode(x))
+    def forward(self, x: Tensor, return_indices: bool = False) -> Tensor:
+        x_hat, top_indices = self.decode(*self.encode(x), return_indices)
+        if return_indices:
+            return x_hat, top_indices
+        return x_hat
 
     @torch.no_grad()
     def set_decoder_norm_to_unit_norm(self):
@@ -115,12 +125,14 @@ def train_sae(
     train_cfg: TrainConfig,
     use_wandb: bool = True,
 ):
-
     if use_wandb:
         wandb.init(
             name=train_cfg.wandb_name,
             project=train_cfg.wandb_project,
-            config={"sae_config": asdict(sae.cfg), "train_config": asdict(train_cfg)},
+            config={
+                "sae_config": asdict(sae.cfg),
+                "train_config": asdict(train_cfg),
+            },
             save_code=True,
         )
 
@@ -130,22 +142,31 @@ def train_sae(
     lr = 2e-4 / (sae.cfg.num_latents / (2**14)) ** 0.5
     optimizer = Adam(sae.parameters(), lr=lr)
 
-    global_inputs = None
-    global_outputs = None
+    x = None
 
     def hook(module: nn.Module, inputs, outputs):
-        nonlocal global_inputs, global_outputs
-        if isinstance(inputs, tuple):
-            inputs = inputs[0]
+        nonlocal x
         if isinstance(outputs, tuple):
             outputs = outputs[0]
 
-        global_inputs = inputs
-        global_outputs = outputs
+        x = outputs
 
         raise StopIteration("Stop here")
 
     handle = hookpoint.register_forward_hook(hook)
+
+    num_tokens_since_fired = torch.zeros(sae.cfg.num_latents)
+
+    def _update_tokens_since_fired(top_indices: Tensor, num_tokens: int):
+        nonlocal num_tokens_since_fired
+        top_indices = top_indices.flatten(end_dim=1)
+        did_fire = torch.zeros(sae.cfg.num_latents, device="cuda").bool()
+        did_fire[top_indices] = True
+        num_tokens_since_fired[did_fire] = 0
+        num_tokens_since_fired[~did_fire] += num_tokens
+
+        dead_count = (num_tokens_since_fired > 10_000_000).sum()
+        wandb.log({"dead_count": dead_count}, step=step)
 
     try:
         tokens_seen_since_last_step = 0
@@ -153,7 +174,6 @@ def train_sae(
         bar = tqdm(token_iterator)
         batch = []
         for step, tokens in enumerate(bar):
-
             if len(batch) < train_cfg.model_batch_size:
                 batch.append(torch.tensor(tokens["input_ids"]))
                 continue
@@ -166,22 +186,16 @@ def train_sae(
                 try:
                     model(batch)
                 except StopIteration:
-                    pass
+                    raise RuntimeError("StopIteration was raised")
 
-            sae_input = global_inputs.to(sae.dtype).to(sae.device)[
-                :, train_cfg.mask_first_n_tokens :
-            ]
-            sae_output = global_outputs.to(sae.dtype).to(sae.device)[
-                :, train_cfg.mask_first_n_tokens :
-            ]
+            x = x.to(sae.dtype).to(sae.device)
+            x = x[:, train_cfg.mask_first_n_tokens :]
 
-            if not sae.cfg.transcode:
-                sae_input = sae_output
-
-            predicted = sae(sae_input)
-            error = predicted - sae_output
-            loss = (error**2).sum()
-            loss /= ((sae_output - sae_output.mean(dim=1, keepdim=True)) ** 2).sum()
+            x_hat, top_indices = sae(x, return_indices=True)
+            _update_tokens_since_fired(top_indices, batch.numel())
+            error = x_hat - x
+            loss = error.pow(2).sum()
+            loss = loss / (x_hat - x_hat.mean(dim=1, keepdim=True)).pow(2).sum()
             loss.backward()
 
             if tokens_seen_since_last_step >= train_cfg.optimize_every_n_tokens:
