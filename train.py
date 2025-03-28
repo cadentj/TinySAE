@@ -8,7 +8,7 @@ def load_model_and_tokenizer(model_name, device):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        device_map="auto",
+        device_map=device,
         torch_dtype=torch.bfloat16,
     )
     return model, tokenizer
@@ -54,10 +54,9 @@ def main():
     MODEL = "google/gemma-3-4b-pt"
     DATASET_NAME = "togethercomputer/RedPajama-Data-1T-Sample"
     CONTEXT_LEN = 1024
-    DEVICE = "cuda:0"
 
     # Load model and tokenizer
-    model, tokenizer = load_model_and_tokenizer(MODEL, DEVICE)
+    model, tokenizer = load_model_and_tokenizer(MODEL, "auto")
     
     # Prepare dataset
     data = prepare_dataset(DATASET_NAME, tokenizer, CONTEXT_LEN)
@@ -69,7 +68,7 @@ def main():
         k=128,
         hookpoint="language_model.model.layers.27",
     )
-    sae = Sae(sae_cfg, device=DEVICE)
+    sae = Sae(sae_cfg, device="cuda")
 
     # Training configuration
     train_cfg = TrainConfig(
